@@ -1,0 +1,6 @@
+# build outputs
+*.apk
+__pycache__/
+*.pyc
+.idea/
+.vscode/
