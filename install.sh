@@ -22,14 +22,15 @@ command -v pw-cat >/dev/null || echo "warning: pw-cat (PipeWire) not found, push
 [[ -w /dev/uinput ]] || echo "warning: /dev/uinput is not writable, mouse control will not work (see README)"
 
 chmod +x "$SERVER"
-mkdir -p "$APPS" "$AUTO"
+mkdir -p "$APPS" "$AUTO" "$HOME/.local/share/icons/hicolor/scalable/apps"
+cp "$DIR/assets/airdeck.svg" "$HOME/.local/share/icons/hicolor/scalable/apps/airdeck.svg"
 
 cat > "$APPS/airdeck.desktop" <<EOF
 [Desktop Entry]
 Name=AirDeck
 Comment=Control this PC from your phone (touchpad, air mouse, push-to-talk)
 Exec=python3 "$SERVER"
-Icon=input-mouse
+Icon=airdeck
 Type=Application
 Categories=Utility;
 Terminal=false
@@ -39,7 +40,7 @@ cat > "$AUTO/airdeck.desktop" <<EOF
 [Desktop Entry]
 Name=AirDeck (background)
 Exec=python3 "$SERVER" --no-browser
-Icon=input-mouse
+Icon=airdeck
 Type=Application
 X-GNOME-Autostart-enabled=true
 NoDisplay=true

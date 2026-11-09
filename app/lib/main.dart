@@ -6,6 +6,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_pcm_sound/flutter_pcm_sound.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:sensors_plus/sensors_plus.dart';
@@ -26,7 +27,98 @@ const int rTalkStart = 0x89, rTalkEnd = 0x8A;
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  FlutterForegroundTask.initCommunicationPort();
   runApp(const AirDeckApp());
+}
+
+// ------------------------------------------------------- background service
+// A foreground service keeps the app process (and its socket to the PC)
+// alive while AirDeck is in the background or the screen is off.
+@pragma('vm:entry-point')
+void bgServiceCallback() {
+  FlutterForegroundTask.setTaskHandler(_BgHandler());
+}
+
+class _BgHandler extends TaskHandler {
+  @override
+  Future<void> onStart(DateTime timestamp, TaskStarter starter) async {}
+  @override
+  void onRepeatEvent(DateTime timestamp) {}
+  @override
+  Future<void> onDestroy(DateTime timestamp, bool isTimeout) async {}
+  @override
+  void onNotificationButtonPressed(String id) {
+    if (id == 'disconnect') FlutterForegroundTask.sendDataToMain('disconnect');
+  }
+
+  @override
+  void onNotificationPressed() => FlutterForegroundTask.launchApp();
+}
+
+class BgService {
+  static bool _inited = false;
+  static void Function()? onDisconnectPressed;
+
+  static void _onData(Object data) {
+    if (data == 'disconnect') onDisconnectPressed?.call();
+  }
+
+  static Future<void> start(String host) async {
+    try {
+      if (!_inited) {
+        _inited = true;
+        FlutterForegroundTask.init(
+          androidNotificationOptions: AndroidNotificationOptions(
+            channelId: 'airdeck_connection',
+            channelName: 'AirDeck connection',
+            channelDescription: 'Shown while AirDeck is connected to your PC',
+            onlyAlertOnce: true,
+            channelImportance: NotificationChannelImportance.LOW,
+            priority: NotificationPriority.LOW,
+          ),
+          iosNotificationOptions: const IOSNotificationOptions(),
+          foregroundTaskOptions: ForegroundTaskOptions(
+            eventAction: ForegroundTaskEventAction.nothing(),
+            autoRunOnBoot: false,
+            allowWakeLock: true,
+            allowWifiLock: true,
+          ),
+        );
+        FlutterForegroundTask.addTaskDataCallback(_onData);
+      }
+      if (await FlutterForegroundTask.checkNotificationPermission() !=
+          NotificationPermission.granted) {
+        await FlutterForegroundTask.requestNotificationPermission();
+      }
+      const buttons = [NotificationButton(id: 'disconnect', text: 'Disconnect')];
+      if (await FlutterForegroundTask.isRunningService) {
+        await FlutterForegroundTask.updateService(
+          notificationTitle: 'AirDeck connected',
+          notificationText: 'Controlling $host · tap to open',
+          notificationButtons: buttons,
+        );
+      } else {
+        await FlutterForegroundTask.startService(
+          serviceId: 4780,
+          serviceTypes: [ForegroundServiceTypes.dataSync],
+          notificationTitle: 'AirDeck connected',
+          notificationText: 'Controlling $host · tap to open',
+          notificationButtons: buttons,
+          callback: bgServiceCallback,
+        );
+      }
+    } catch (_) {
+      // the app still works in the foreground without the service
+    }
+  }
+
+  static Future<void> stop() async {
+    try {
+      if (await FlutterForegroundTask.isRunningService) {
+        await FlutterForegroundTask.stopService();
+      }
+    } catch (_) {}
+  }
 }
 
 class AirDeckApp extends StatelessWidget {
@@ -346,6 +438,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
         await Future.delayed(const Duration(seconds: 2));
       }
     } while (!_cancel && DateTime.now().isBefore(deadline));
+    BgService.stop();
     if (!mounted) return;
     setState(() {
       _busy = false;
@@ -387,13 +480,19 @@ class _ConnectScreenState extends State<ConnectScreen> {
       _status = null;
       _ip.text = ip;
     });
+    await BgService.start(conn.host);
+    if (!mounted) return;
     await Navigator.of(context).push(MaterialPageRoute(
         builder: (_) =>
             ControlScreen(conn: conn, pcTalking: _talk, closed: closed)));
     final dropped = closed.value;
     conn.close();
     _talk.value = false;
-    if (dropped && mounted) _autoConnect(keepTrying: true);
+    if (dropped && mounted) {
+      _autoConnect(keepTrying: true); // service stays up while reconnecting
+    } else {
+      BgService.stop();
+    }
   }
 
   Future<void> _scan() async {
@@ -609,7 +708,8 @@ class ControlScreen extends StatefulWidget {
   State<ControlScreen> createState() => _ControlScreenState();
 }
 
-class _ControlScreenState extends State<ControlScreen> {
+class _ControlScreenState extends State<ControlScreen>
+    with WidgetsBindingObserver {
   Connection get conn => widget.conn;
 
   // settings
@@ -651,6 +751,10 @@ class _ControlScreenState extends State<ControlScreen> {
   void initState() {
     super.initState();
     widget.closed.addListener(_onClosed);
+    WidgetsBinding.instance.addObserver(this);
+    BgService.onDisconnectPressed = () {
+      if (mounted) Navigator.of(context).maybePop();
+    };
     SharedPreferences.getInstance().then((p) {
       if (!mounted) return;
       setState(() {
@@ -671,7 +775,19 @@ class _ControlScreenState extends State<ControlScreen> {
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Stay connected in the background, but stop the air mouse so the
+    // cursor doesn't wander while the phone is in a pocket.
+    if (state != AppLifecycleState.resumed) {
+      if (_gyroOn) _toggleGyro();
+      if (_talking) _talkStop();
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    BgService.onDisconnectPressed = null;
     widget.closed.removeListener(_onClosed);
     _gyroSub?.cancel();
     _stt.cancel();

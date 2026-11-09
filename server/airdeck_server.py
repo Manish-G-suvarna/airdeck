@@ -400,7 +400,7 @@ def local_ips():
 # --------------------------------------------------------------- local page
 PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>AirDeck</title><style>
+<title>AirDeck</title><link rel="icon" href="/airdeck.svg"><style>
 :root{--bg:#0f1115;--card:#181b22;--fg:#e8eaf0;--mut:#9aa0ad;--acc:#5b8cff;--hot:#ff4d5e}
 @media (prefers-color-scheme: light){:root{--bg:#f4f5f8;--card:#fff;--fg:#151821;--mut:#5d6472}}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);
@@ -414,7 +414,7 @@ main{width:100%;max-width:440px}h1{font-size:22px;margin:0 0 4px}
 color:#fff;font:600 20px system-ui;cursor:pointer;user-select:none;touch-action:none}
 #talk.on{background:var(--hot)}#in{color:var(--acc);font-weight:600;min-height:22px}
 </style></head><body><main>
-<h1>AirDeck</h1><div class="mut" id="host"></div>
+<h1><img src="/airdeck.svg" alt="" width="28" height="28" style="vertical-align:-5px;margin-right:8px">AirDeck</h1><div class="mut" id="host"></div>
 <div class="card qrcard"><div class="mut">Open AirDeck on your phone and tap <b>Scan QR</b></div>
 <div id="qr"></div>
 <div class="mut">Or enter it by hand: address <b id="ips"></b> · code <b class="code" id="pin"></b></div></div>
@@ -461,6 +461,9 @@ def make_ui_handler(server):
             elif self.path == "/qrcode.min.js":
                 with open(os.path.join(HERE, "qrcode.min.js"), "rb") as fh:
                     self._send(200, fh.read(), "application/javascript")
+            elif self.path == "/airdeck.svg":
+                with open(os.path.join(HERE, "airdeck.svg"), "rb") as fh:
+                    self._send(200, fh.read(), "image/svg+xml")
             elif self.path == "/status":
                 self._send(200, json.dumps(server.status()).encode(),
                            "application/json")
