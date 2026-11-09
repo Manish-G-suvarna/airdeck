@@ -268,7 +268,14 @@ class Server:
     # -------- per-phone connection
     def handle(self, sock, addr):
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        sock.settimeout(20)
+        # Phones pause apps in the background (battery saver), so pings can
+        # stop for minutes while the link is fine. Let TCP keepalive detect
+        # phones that are really gone instead of a short read timeout.
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 15)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 4)
+        sock.settimeout(None)
         f = sock.makefile("rb")
         authed = False
         name = addr[0]
