@@ -4,7 +4,8 @@ Control your Linux PC from your Android phone over Wi-Fi.
 
 - **Touchpad**: tap to click, two-finger tap to right-click, two-finger drag to scroll
 - **Air mouse**: move the cursor by pointing and turning the phone (gyroscope)
-- **Hold to talk**: walkie-talkie voice in both directions, phone ↔ PC
+- **Voice typing**: hold the button on the phone, speak, and the words are typed on the PC (uses the phone's speech recognition; language and "press Enter after" are in settings)
+- **PC talk**: hold the button on the PC page to talk through the phone's speaker
 - **Keyboard**: type on the PC from the phone keyboard, plus shortcut keys (copy, paste, Alt+Tab, media, volume)
 - **Easy pairing**: scan a QR code once; after that the phone reconnects by itself
 

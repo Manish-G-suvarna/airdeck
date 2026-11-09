@@ -8,9 +8,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_pcm_sound/flutter_pcm_sound.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
-import 'package:record/record.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:speech_to_text/speech_recognition_result.dart';
+import 'package:speech_to_text/speech_to_text.dart';
 
 // ------------------------------------------------------------------ protocol
 const int tcpPort = 47800;
@@ -630,9 +631,16 @@ class _ControlScreenState extends State<ControlScreen> {
   int _maxPointers = 0;
 
   // push to talk
-  final AudioRecorder _rec = AudioRecorder();
-  StreamSubscription<Uint8List>? _micSub;
+  // hold to talk = speech to text, typed on the PC
+  final SpeechToText _stt = SpeechToText();
+  bool _sttReady = false;
   bool _talking = false;
+  String _heard = '';
+  String? _finalText;
+  Completer<void>? _finalDone;
+  List<LocaleName> _locales = [];
+  String? _localeId;
+  bool _enterAfter = false;
 
   // keyboard
   final _kb = TextEditingController(text: ' ');
@@ -649,6 +657,8 @@ class _ControlScreenState extends State<ControlScreen> {
         _touchSpeed = p.getDouble('touchSpeed') ?? _touchSpeed;
         _gyroSpeed = p.getDouble('gyroSpeed') ?? _gyroSpeed;
         _invertScroll = p.getBool('invertScroll') ?? true;
+        _localeId = p.getString('speechLocale');
+        _enterAfter = p.getBool('enterAfter') ?? false;
       });
     });
   }
@@ -664,8 +674,7 @@ class _ControlScreenState extends State<ControlScreen> {
   void dispose() {
     widget.closed.removeListener(_onClosed);
     _gyroSub?.cancel();
-    _micSub?.cancel();
-    _rec.dispose();
+    _stt.cancel();
     _kb.dispose();
     _kbFocus.dispose();
     super.dispose();
@@ -756,37 +765,91 @@ class _ControlScreenState extends State<ControlScreen> {
     });
   }
 
-  // ---------------- push to talk
+  // ---------------- hold to talk: speech to text
+  Future<bool> _ensureStt() async {
+    if (_sttReady) return true;
+    _sttReady = await _stt.initialize(onError: (e) {
+      if (!mounted || e.errorMsg == 'error_speech_timeout') return;
+      if (e.errorMsg == 'error_no_match') {
+        _finalDone?.complete();
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Speech recognition: ${e.errorMsg}')));
+    });
+    if (_sttReady) {
+      _locales = await _stt.locales();
+      _localeId ??= (await _stt.systemLocale())?.localeId;
+    }
+    return _sttReady;
+  }
+
   Future<void> _talkStart() async {
     if (_talking) return;
-    if (!await _rec.hasPermission()) {
+    setState(() {
+      _talking = true;
+      _heard = '';
+    });
+    if (!await _ensureStt()) {
+      setState(() => _talking = false);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text('Microphone permission is needed to talk')));
+            content: Text(
+                'Speech recognition is not available. Allow the microphone permission and try again.')));
       }
       return;
     }
-    setState(() => _talking = true);
+    if (!_talking) return; // released while initializing
     HapticFeedback.mediumImpact();
-    conn.send(tTalkStart);
-    final stream = await _rec.startStream(const RecordConfig(
-      encoder: AudioEncoder.pcm16bits,
-      sampleRate: sampleRate,
-      numChannels: 1,
-      noiseSuppress: true,
-      echoCancel: true,
-    ));
-    _micSub = stream.listen((chunk) => conn.send(tAudio, chunk));
-    if (!_talking) _talkStop(); // released before the mic finished starting
+    _finalText = null;
+    _finalDone = Completer<void>();
+    await _stt.listen(
+      onResult: (SpeechRecognitionResult r) {
+        if (!mounted) return;
+        setState(() => _heard = r.recognizedWords);
+        if (r.finalResult) {
+          _finalText = r.recognizedWords;
+          if (!(_finalDone?.isCompleted ?? true)) _finalDone!.complete();
+        }
+      },
+      listenOptions: SpeechListenOptions(
+        partialResults: true,
+        cancelOnError: true,
+        localeId: _localeId,
+        listenFor: const Duration(minutes: 1),
+        pauseFor: const Duration(seconds: 10),
+      ),
+    );
   }
 
   Future<void> _talkStop() async {
-    if (!_talking && _micSub == null) return;
+    if (!_talking) return;
     setState(() => _talking = false);
-    await _rec.stop();
-    await _micSub?.cancel();
-    _micSub = null;
-    conn.send(tTalkEnd);
+    if (!_sttReady) return;
+    await _stt.stop();
+    // wait briefly for the recognizer to deliver its final text
+    try {
+      await _finalDone?.future.timeout(const Duration(seconds: 3));
+    } catch (_) {}
+    final text = (_finalText ?? _heard).trim();
+    if (text.isEmpty) {
+      if (mounted) setState(() => _heard = '');
+      return;
+    }
+    if (_enterAfter) {
+      conn.text(text);
+      conn.key('enter');
+    } else {
+      conn.text('$text ');
+    }
+    HapticFeedback.selectionClick();
+    if (!mounted) return;
+    setState(() => _heard = 'Typed: $text');
+    Future.delayed(const Duration(seconds: 3), () {
+      if (mounted && !_talking && _heard == 'Typed: $text') {
+        setState(() => _heard = '');
+      }
+    });
   }
 
   // ---------------- keyboard
@@ -849,6 +912,41 @@ class _ControlScreenState extends State<ControlScreen> {
                       setState(() {});
                     },
                     onChangeEnd: (_) => save())),
+            SwitchListTile(
+                title: const Text('Press Enter after voice typing'),
+                subtitle: const Text('Useful for search boxes and chats'),
+                value: _enterAfter,
+                onChanged: (v) async {
+                  set(() => _enterAfter = v);
+                  setState(() {});
+                  (await SharedPreferences.getInstance())
+                      .setBool('enterAfter', v);
+                }),
+            if (_locales.isNotEmpty)
+              ListTile(
+                title: const Text('Voice typing language'),
+                trailing: DropdownButton<String>(
+                  value: _locales.any((l) => l.localeId == _localeId)
+                      ? _localeId
+                      : null,
+                  hint: const Text('Phone default'),
+                  items: [
+                    for (final l in (_locales.toList()
+                      ..sort((a, b) => a.name.compareTo(b.name))))
+                      DropdownMenuItem(
+                          value: l.localeId,
+                          child: Text(l.name, overflow: TextOverflow.ellipsis)),
+                  ],
+                  onChanged: (v) async {
+                    set(() => _localeId = v);
+                    setState(() {});
+                    if (v != null) {
+                      (await SharedPreferences.getInstance())
+                          .setString('speechLocale', v);
+                    }
+                  },
+                ),
+              ),
             SwitchListTile(
                 title: const Text('Natural scrolling (like a phone)'),
                 value: _invertScroll,
@@ -998,6 +1096,20 @@ class _ControlScreenState extends State<ControlScreen> {
               ),
             ),
           ),
+          if (_talking || _heard.isNotEmpty)
+            Container(
+              width: double.infinity,
+              margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: cs.secondaryContainer,
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: Text(
+                _heard.isEmpty ? 'Listening… speak now' : _heard,
+                style: TextStyle(color: cs.onSecondaryContainer, fontSize: 16),
+              ),
+            ),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 8),
             child: Row(children: [
@@ -1041,7 +1153,7 @@ class _ControlScreenState extends State<ControlScreen> {
                               ? cs.onError
                               : cs.onSecondaryContainer),
                       const SizedBox(width: 8),
-                      Text(_talking ? 'Talking…' : 'Hold to talk',
+                      Text(_talking ? 'Listening…' : 'Hold to type by voice',
                           style: TextStyle(
                               color: _talking
                                   ? cs.onError
